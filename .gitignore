@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+
+# AWS / SAM
+.aws-sam/
+.sam-cache/
+
+# Lambda build artifacts
+*.zip
+*.pyd
+*.pdb
+*.so
+*.dist-info/
+
+# Local secrets / configuration
+.env
+.env.*
+.aws/
+credentials
+*.pem
+*.key
+
+
+# OS files
+.DS_Store
+Thumbs.db

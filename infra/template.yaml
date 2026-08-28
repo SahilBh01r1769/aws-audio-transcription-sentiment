@@ -1,0 +1,649 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Serverless audio transcription and sentiment analysis application.
+  Supports near-real-time WebSocket transcription and batch file transcription.
+
+Parameters:
+  StageName:
+    Type: String
+    Default: prod
+    Description: API Gateway stage name
+
+  CloudFrontPriceClass:
+    Type: String
+    Default: PriceClass_100
+    AllowedValues:
+      - PriceClass_100
+      - PriceClass_200
+      - PriceClass_All
+    Description: CloudFront edge location price class
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Handler: lambda_function.lambda_handler
+    Architectures:
+      - x86_64
+    MemorySize: 128
+    Timeout: 15
+
+Resources:
+
+  # =========================================================
+  # DynamoDB
+  # =========================================================
+
+  ConnectionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+
+      AttributeDefinitions:
+        - AttributeName: connection_id
+          AttributeType: S
+
+      KeySchema:
+        - AttributeName: connection_id
+          KeyType: HASH
+
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  LogsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+
+      AttributeDefinitions:
+        - AttributeName: log_id
+          AttributeType: S
+
+      KeySchema:
+        - AttributeName: log_id
+          KeyType: HASH
+
+
+  # =========================================================
+  # S3 — uploaded audio + transcription output
+  # =========================================================
+
+  UploadBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - "*"
+            AllowedMethods:
+              - GET
+              - PUT
+            AllowedOrigins:
+              - "*"
+            MaxAge: 3000
+
+
+  # =========================================================
+  # S3 — private frontend origin
+  # =========================================================
+
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+
+  # =========================================================
+  # Lambda — GET /logs
+  # =========================================================
+
+  GetLogsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/get_logs/
+
+      Environment:
+        Variables:
+          LOGS_TABLE_NAME: !Ref LogsTable
+
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref LogsTable
+
+
+  # =========================================================
+  # Lambda — POST /upload-url
+  # =========================================================
+
+  UploadUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/upload_url/
+      Timeout: 10
+
+      Environment:
+        Variables:
+          UPLOAD_BUCKET_NAME: !Ref UploadBucket
+
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Ref UploadBucket
+
+
+  # =========================================================
+  # Lambda — S3 upload -> start Transcribe batch job
+  # =========================================================
+
+  TranscribeStatusFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/transcribe_status/
+
+      Environment:
+        Variables:
+          TRANSCRIBE_OUTPUT_BUCKET: !Ref UploadBucket
+
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref UploadBucket
+
+        - Statement:
+            Effect: Allow
+            Action:
+              - transcribe:StartTranscriptionJob
+            Resource: "*"
+
+      Events:
+        UploadedAudio:
+          Type: S3
+          Properties:
+            Bucket: !Ref UploadBucket
+            Events:
+              - s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: uploads/
+
+
+  # =========================================================
+  # Lambda — EventBridge -> process completed transcription
+  # =========================================================
+
+  TranscribeCompleteFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/transcribe_complete/
+      Timeout: 30
+
+      Environment:
+        Variables:
+          TRANSCRIBE_OUTPUT_BUCKET: !Ref UploadBucket
+          LOGS_TABLE_NAME: !Ref LogsTable
+
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref UploadBucket
+
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LogsTable
+
+        - ComprehendBasicAccessPolicy: {}
+
+      Events:
+        TranscribeStateChange:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source:
+                - aws.transcribe
+
+              detail-type:
+                - Transcribe Job State Change
+
+              detail:
+                TranscriptionJobStatus:
+                  - COMPLETED
+                  - FAILED
+
+
+  # =========================================================
+  # Lambda — WebSocket connect
+  # =========================================================
+
+  WsConnectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/ws_connect/
+
+      Environment:
+        Variables:
+          CONNECTIONS_TABLE_NAME: !Ref ConnectionsTable
+
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ConnectionsTable
+
+
+  # =========================================================
+  # Lambda — WebSocket disconnect
+  # =========================================================
+
+  WsDisconnectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/ws_disconnect/
+
+      Environment:
+        Variables:
+          CONNECTIONS_TABLE_NAME: !Ref ConnectionsTable
+          LOGS_TABLE_NAME: !Ref LogsTable
+
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ConnectionsTable
+
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LogsTable
+
+        - ComprehendBasicAccessPolicy: {}
+
+
+  # =========================================================
+  # Lambda — WebSocket live transcription
+  # =========================================================
+
+  WsMessageFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/ws_message/
+
+      MemorySize: 512
+      Timeout: 72
+
+      Environment:
+        Variables:
+          MIC_SAMPLE_RATE: "16000"
+          CONNECTIONS_TABLE_NAME: !Ref ConnectionsTable
+          LOGS_TABLE_NAME: !Ref LogsTable
+
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ConnectionsTable
+
+        - DynamoDBCrudPolicy:
+            TableName: !Ref LogsTable
+
+        - ComprehendBasicAccessPolicy: {}
+
+        - Statement:
+            Effect: Allow
+            Action:
+              - transcribe:StartStreamTranscription
+            Resource: "*"
+
+        - Statement:
+            Effect: Allow
+            Action:
+              - execute-api:ManageConnections
+            Resource:
+              - !Sub >
+                  arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/POST/@connections/*
+
+
+  # =========================================================
+  # HTTP API
+  # =========================================================
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "${AWS::StackName}-http"
+      ProtocolType: HTTP
+
+      CorsConfiguration:
+        AllowOrigins:
+          - "*"
+
+        AllowMethods:
+          - GET
+          - POST
+          - OPTIONS
+
+        AllowHeaders:
+          - Content-Type
+
+
+  UploadUrlIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt UploadUrlFunction.Arn
+      PayloadFormatVersion: "2.0"
+      TimeoutInMillis: 10000
+
+
+  UploadUrlRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /upload-url"
+      Target: !Sub "integrations/${UploadUrlIntegration}"
+
+
+  GetLogsIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt GetLogsFunction.Arn
+      PayloadFormatVersion: "2.0"
+      TimeoutInMillis: 15000
+
+
+  GetLogsRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /logs"
+      Target: !Sub "integrations/${GetLogsIntegration}"
+
+
+  HttpApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: !Ref StageName
+      AutoDeploy: true
+
+
+  UploadUrlInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref UploadUrlFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub >
+        arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/POST/upload-url
+
+
+  GetLogsInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref GetLogsFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub >
+        arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/GET/logs
+
+
+  # =========================================================
+  # WebSocket API
+  # =========================================================
+
+  WebSocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "${AWS::StackName}-ws"
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: "$request.body.action"
+
+
+  WsConnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationMethod: POST
+
+      IntegrationUri: !Sub >
+        arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WsConnectFunction.Arn}/invocations
+
+      TimeoutInMillis: 29000
+
+
+  WsMessageIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationMethod: POST
+
+      IntegrationUri: !Sub >
+        arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WsMessageFunction.Arn}/invocations
+
+      TimeoutInMillis: 29000
+
+
+  WsDisconnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationMethod: POST
+
+      IntegrationUri: !Sub >
+        arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WsDisconnectFunction.Arn}/invocations
+
+      TimeoutInMillis: 29000
+
+
+  WsConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "$connect"
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${WsConnectIntegration}"
+
+
+  WsMessageRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "audio_chunk"
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${WsMessageIntegration}"
+
+
+  WsDisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: "$disconnect"
+      AuthorizationType: NONE
+      Target: !Sub "integrations/${WsDisconnectIntegration}"
+
+
+  WebSocketStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WebSocketApi
+      StageName: !Ref StageName
+      AutoDeploy: true
+
+
+  WsConnectInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref WsConnectFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+
+      SourceArn: !Sub >
+        arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/$connect
+
+
+  WsMessageInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref WsMessageFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+
+      SourceArn: !Sub >
+        arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/audio_chunk
+
+
+  WsDisconnectInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref WsDisconnectFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+
+      SourceArn: !Sub >
+        arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/$disconnect
+
+
+  # =========================================================
+  # CloudFront
+  # =========================================================
+
+  FrontendOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${AWS::StackName}-frontend-oac"
+        Description: CloudFront access to private frontend S3 bucket
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+
+  FrontendDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+
+        Enabled: true
+        DefaultRootObject: index.html
+        PriceClass: !Ref CloudFrontPriceClass
+
+        Origins:
+          - Id: FrontendS3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt FrontendOriginAccessControl.Id
+
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+
+        DefaultCacheBehavior:
+          TargetOriginId: FrontendS3Origin
+
+          ViewerProtocolPolicy: redirect-to-https
+
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+
+          CachedMethods:
+            - GET
+            - HEAD
+
+          Compress: true
+
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+
+          MinTTL: 0
+          DefaultTTL: 300
+          MaxTTL: 86400
+
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+
+      PolicyDocument:
+        Version: "2012-10-17"
+
+        Statement:
+          - Sid: AllowCloudFrontReadOnly
+            Effect: Allow
+
+            Principal:
+              Service: cloudfront.amazonaws.com
+
+            Action:
+              - s3:GetObject
+
+            Resource:
+              - !Sub "${FrontendBucket.Arn}/*"
+
+            Condition:
+              StringEquals:
+                AWS:SourceArn:
+                  !Sub "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${FrontendDistribution}"
+
+
+Outputs:
+
+  HttpApiUrl:
+    Description: HTTP API base URL
+    Value:
+      !Sub "https://${HttpApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${StageName}"
+
+
+  WebSocketUrl:
+    Description: WebSocket API URL
+    Value:
+      !Sub "wss://${WebSocketApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/${StageName}"
+
+
+  FrontendUrl:
+    Description: HTTPS CloudFront frontend URL
+    Value:
+      !Sub "https://${FrontendDistribution.DomainName}"
+
+
+  FrontendBucketName:
+    Description: Bucket used for frontend static files
+    Value: !Ref FrontendBucket
+
+
+  UploadBucketName:
+    Description: Bucket used for uploaded audio and Transcribe output
+    Value: !Ref UploadBucket
+
+
+  ConnectionsTableName:
+    Description: DynamoDB WebSocket connection table
+    Value: !Ref ConnectionsTable
+
+
+  LogsTableName:
+    Description: DynamoDB transcription log table
+    Value: !Ref LogsTable
