@@ -1,0 +1,40 @@
+name: frontend ui checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  validate-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check JavaScript syntax
+        run: |
+          node --check frontend/app.js
+          node --check frontend/ui-cleanup.js
+      - name: Check restrained UI rules
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          html = Path('frontend/index.html').read_text(encoding='utf-8')
+          banned = {
+              'harsh gradient': ['linear-gradient', 'radial-gradient'],
+              'banned fonts': ['Inter', 'Geist', 'Space Grotesk'],
+              'old dark palette': ['#0b0d0f', '#14171a', '#1b1f23'],
+              'purple accent': ['#c084fc', '#a78bfa', '#8b5cf6'],
+              'emoji tabs': ['🎙', '📁', '📜'],
+              'colored left stripe': ['border-left: 4px', 'border-left:4px'],
+          }
+          for label, needles in banned.items():
+              for needle in needles:
+                  assert needle not in html, f'{label} found: {needle}'
+          assert 'ui-cleanup.js' in html, 'UI sanitation script missing'
+          assert 'skeleton-cell' in html, 'Skeleton loading state missing'
+          print('Signal frontend UI checks passed.')
+          PY
