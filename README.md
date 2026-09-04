@@ -1,24 +1,33 @@
 # Signal — AWS Audio Transcription & Sentiment
 
-[![AWS](https://img.shields.io/badge/AWS-Serverless-232F3E?logo=amazonaws&logoColor=white)](https://aws.amazon.com/)
-[![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![SAM](https://img.shields.io/badge/IaC-AWS%20SAM-FF9900?logo=amazonaws&logoColor=white)](infra/template.yaml)
-[![Status](https://img.shields.io/badge/status-live-2ea44f)](#deployment-status)
+**Signal** is a serverless AWS application for live microphone transcription, sentiment analysis, and asynchronous audio-file transcription.
 
-**Signal** is a fully serverless audio transcription and sentiment-analysis application built on AWS. It supports both **near-real-time microphone transcription** over WebSockets and **asynchronous file transcription**, with sentiment scoring and persistent session logs.
+The project uses **API Gateway WebSockets, AWS Lambda, Amazon Transcribe, Amazon Comprehend, DynamoDB, S3, EventBridge, and CloudFront**. The live path uses buffered near-real-time transcription rather than pretending a Lambda-based WebSocket integration is one persistent Transcribe session.
 
-The browser frontend is served through **Amazon CloudFront**, while the backend is composed entirely of managed AWS services—API Gateway, Lambda, Transcribe, Comprehend, S3, DynamoDB, and EventBridge.
+## Demo
+
+> **Live demo video / GIF placeholder**  
+> Add the final recording at `docs/demo-live.gif` or link the recorded video here.
+
+<!-- Example once added:
+![Live transcription demo](docs/demo-live.gif)
+-->
+
+> **AWS architecture / console screenshot placeholder**  
+> Add the selected AWS Console screenshot at `docs/aws-architecture.png`.
+
+<!-- Example once added:
+![AWS architecture](docs/aws-architecture.png)
+-->
 
 ## What it does
 
-- **Live microphone mode** — captures browser microphone audio and sends short PCM chunks over a WebSocket connection.
-- **Near-real-time transcription** — each chunk is processed with Amazon Transcribe Streaming and returned to the browser.
-- **Sentiment analysis** — final transcript segments are scored with Amazon Comprehend.
-- **Session transcript** — transcript fragments are accumulated for the active WebSocket connection and summarized when the session ends.
-- **Audio file upload** — files are uploaded directly to S3 through a presigned URL.
-- **Asynchronous batch transcription** — S3 events start Amazon Transcribe jobs and EventBridge handles completion.
-- **Persistent activity feed** — transcript and sentiment results are stored in DynamoDB and exposed through a lightweight HTTP API.
-- **Serverless frontend delivery** — static assets are hosted privately in S3 and served over HTTPS through CloudFront.
+- Captures microphone audio in the browser and sends small PCM frames through API Gateway WebSockets.
+- Buffers those frames into larger speech segments before sending them to Amazon Transcribe, which gives the recognizer enough context to produce useful text.
+- Returns transcript segments and Amazon Comprehend sentiment results to the browser while the session is active.
+- Flushes the final incomplete audio segment when recording stops so the end of a sentence is not lost.
+- Accepts audio-file uploads through presigned S3 URLs and processes them asynchronously with Amazon Transcribe.
+- Stores transcription and sentiment results in DynamoDB and exposes recent activity through an HTTP API.
 
 ## Architecture
 
@@ -27,27 +36,27 @@ flowchart LR
     U[Browser] -->|HTTPS| CF[CloudFront]
     CF --> FE[S3 Frontend]
 
-    U -->|WebSocket audio_chunk| WS[API Gateway WebSocket]
-    WS --> WM[Lambda: ws_message]
-    WM --> TS[Amazon Transcribe Streaming]
+    U -->|0.5 s PCM frames| WS[API Gateway WebSocket]
+    WS --> WM[ws_message Lambda]
+    WM -->|temporary session buffer| DDB[(DynamoDB)]
+    WM -->|buffered audio segment| TS[Amazon Transcribe Streaming]
     WM --> C[Amazon Comprehend]
-    WM --> DDB[(DynamoDB)]
     WM -->|transcript + sentiment| WS
 
     U -->|POST /upload-url| HTTP[API Gateway HTTP]
-    HTTP --> UL[Lambda: upload_url]
-    UL -->|presigned PUT URL| U
-    U -->|PUT audio| S3[(S3 Upload Bucket)]
+    HTTP --> UL[upload_url Lambda]
+    UL -->|presigned PUT| U
+    U --> S3[(S3 Upload Bucket)]
 
-    S3 -->|ObjectCreated: uploads/*| ST[Lambda: transcribe_status]
+    S3 --> ST[transcribe_status Lambda]
     ST --> TB[Amazon Transcribe Batch]
     TB --> EB[EventBridge]
-    EB --> TC[Lambda: transcribe_complete]
+    EB --> TC[transcribe_complete Lambda]
     TC --> C
     TC --> DDB
 
     U -->|GET /logs| HTTP
-    HTTP --> GL[Lambda: get_logs]
+    HTTP --> GL[get_logs Lambda]
     GL --> DDB
 ```
 
@@ -55,56 +64,101 @@ flowchart LR
 
 ```text
 Browser microphone
-  → API Gateway WebSocket
+  → 0.5 s PCM WebSocket frames
   → ws_message Lambda
-  → Amazon Transcribe Streaming
+  → temporary per-connection buffer in DynamoDB
+  → ~6 s buffered segment
+  → Amazon Transcribe
   → Amazon Comprehend
-  → DynamoDB
-  → transcript + sentiment back to browser
+  → transcript + sentiment returned to browser
 ```
+
+When the user presses **Stop**, the browser sends any remaining local audio and requests a graceful session finish. The backend processes the remaining server-side buffer before the WebSocket is closed.
+
+This is **buffered near-real-time transcription**, not a single long-lived Transcribe stream across the whole browser session.
 
 ### File upload flow
 
 ```text
 Browser
-  → POST /upload-url
-  → presigned S3 PUT
-  → S3 ObjectCreated (uploads/ only)
-  → transcribe_status Lambda
-  → Amazon Transcribe batch job
+  → request presigned upload URL
+  → direct S3 upload
+  → S3 event
+  → start Amazon Transcribe batch job
   → EventBridge completion event
-  → transcribe_complete Lambda
-  → Comprehend + DynamoDB
-  → GET /logs
+  → process transcript + sentiment
+  → store result in DynamoDB
 ```
 
-> The live path is intentionally **chunked near-real-time transcription**, not one long-lived Transcribe stream for the entire browser session.
+## Project evolution
+
+The first working version was assembled directly in the AWS Console while I was learning how API Gateway WebSockets, Lambda, Transcribe, DynamoDB, and the browser audio pipeline behave together.
+
+The original live-transcription implementation treated every small WebSocket audio message as an independent Transcribe session. That kept the integration simple, but the speech recognizer had almost no surrounding context. In practice, words were skipped or misinterpreted and the result was not useful as a continuous transcript.
+
+The live path was then changed so the browser still sends small frames that stay within API Gateway WebSocket limits, while Lambda persists them temporarily by connection and sends a larger buffered segment to Transcribe. This produced a large improvement in transcript continuity without replacing the existing serverless architecture.
+
+A second issue appeared at session shutdown: if the user stopped recording while the final segment was still incomplete or being processed, the WebSocket could close before the last text returned. The stop flow was changed to perform a graceful drain and close only after the backend finishes the remaining audio.
+
+The infrastructure was later documented in AWS SAM so the architecture is represented as code rather than existing only as manually configured cloud resources.
+
+## Issues faced and solved
+
+### 1. Very poor live transcription across short chunks
+
+**Problem:** The browser sent small audio frames and each frame opened a new Transcribe Streaming session. Each request was valid on its own, but Transcribe repeatedly lost linguistic context at chunk boundaries.
+
+**Fix:** Keep the small WebSocket transport frames, accumulate them into a larger per-connection audio buffer, and transcribe the combined segment. This preserved the API Gateway transport while giving Transcribe substantially more context.
+
+### 2. WebSocket payload-size constraint
+
+**Problem:** Sending a complete multi-second raw PCM segment as one JSON WebSocket message would grow beyond the practical API Gateway frame limit.
+
+**Fix:** Transport remains split into roughly 0.5-second PCM frames. Buffering happens behind the WebSocket boundary instead of making the client send one large message.
+
+### 3. Final words lost when recording stopped
+
+**Problem:** The original frontend closed the WebSocket shortly after Stop. A partially filled buffer, or a Transcribe request already in progress, could finish after the connection disappeared.
+
+**Fix:** Stop now becomes a graceful finish operation: local audio is flushed, microphone capture ends, the socket stays open, the backend drains the final buffer, and only then does the session close.
+
+### 4. DynamoDB transcript concatenation failure
+
+**Problem:** An early helper attempted to concatenate DynamoDB string attributes with `+` inside an update expression. DynamoDB treats `+` as numeric addition, causing a `ValidationException` after transcription had already succeeded.
+
+**Fix:** Transcript segments are stored as a list and appended using DynamoDB `list_append`, then joined when the cumulative transcript is needed.
+
+### 5. Lambda state does not survive WebSocket messages
+
+**Problem:** API Gateway maintains the client WebSocket connection, but each route message can invoke a separate Lambda execution. In-memory session state therefore cannot be relied on between audio messages.
+
+**Fix:** Per-connection state, transcript fragments, and temporary audio-buffer state are persisted in DynamoDB.
 
 ## AWS services
 
-| Service | Purpose |
+| Service | Role |
 |---|---|
-| **Amazon CloudFront** | HTTPS delivery for the static frontend |
-| **Amazon S3** | Frontend assets, uploaded audio, and batch-transcription output |
-| **Amazon API Gateway** | HTTP endpoints and WebSocket transport |
-| **AWS Lambda** | Stateless application logic |
-| **Amazon Transcribe** | Streaming and batch speech-to-text |
-| **Amazon Comprehend** | Text sentiment analysis |
-| **Amazon DynamoDB** | WebSocket connection state and transcription logs |
-| **Amazon EventBridge** | Transcribe job completion events |
-| **AWS SAM / CloudFormation** | Reproducible infrastructure definition |
+| CloudFront | HTTPS delivery of the frontend |
+| S3 | Static frontend, audio uploads, batch-transcription data |
+| API Gateway | HTTP API and WebSocket transport |
+| Lambda | Application and event-processing logic |
+| Amazon Transcribe | Live buffered and batch speech-to-text |
+| Amazon Comprehend | Sentiment analysis |
+| DynamoDB | Connection state, temporary live-session state, logs |
+| EventBridge | Batch Transcribe completion handling |
+| AWS SAM | Infrastructure definition |
 
 ## Lambda functions
 
-| Function | Trigger | Responsibility |
-|---|---|---|
-| `ws_connect` | WebSocket `$connect` | Creates connection state in DynamoDB |
-| `ws_disconnect` | WebSocket `$disconnect` | Finalizes the session summary and removes connection state |
-| `ws_message` | WebSocket `audio_chunk` | Transcribes audio, scores sentiment, stores results, and replies to the client |
-| `upload_url` | `POST /upload-url` | Generates a presigned S3 upload URL |
-| `transcribe_status` | S3 `ObjectCreated` under `uploads/` | Starts an asynchronous Transcribe job |
-| `transcribe_complete` | EventBridge | Processes completed/failed Transcribe jobs and stores results |
-| `get_logs` | `GET /logs` | Returns recent transcription log entries |
+| Function | Responsibility |
+|---|---|
+| `ws_connect` | Creates WebSocket connection state |
+| `ws_message` | Buffers live audio, transcribes segments, analyzes sentiment, and responds to the browser |
+| `ws_disconnect` | Final session cleanup and summary handling |
+| `upload_url` | Generates presigned S3 upload URLs |
+| `transcribe_status` | Starts asynchronous Transcribe jobs after upload |
+| `transcribe_complete` | Processes completed batch jobs |
+| `get_logs` | Returns recent transcription activity |
 
 ## Repository structure
 
@@ -124,21 +178,19 @@ Browser
 │   ├── ws_connect/
 │   ├── ws_disconnect/
 │   └── ws_message/
-├── .gitignore
+├── docs/                  # demo media / AWS screenshots
 └── README.md
 ```
 
-## Frontend configuration
+## Configuration
 
-Runtime API endpoints are intentionally excluded from source control.
-
-Copy the example configuration:
+Runtime API endpoints are kept out of source control.
 
 ```powershell
 Copy-Item .\frontend\config.example.js .\frontend\config.js
 ```
 
-Then set the values returned by your deployed stack:
+Then configure the deployed endpoints:
 
 ```javascript
 window.APP_CONFIG = {
@@ -147,75 +199,28 @@ window.APP_CONFIG = {
 };
 ```
 
-`frontend/config.js` is ignored by Git so deployment-specific endpoints do not get committed accidentally.
+`frontend/config.js` is ignored by Git.
 
 ## Infrastructure
 
-The infrastructure definition lives in [`infra/template.yaml`](infra/template.yaml).
-
-It provisions the application architecture including:
-
-- DynamoDB connection and log tables
-- TTL cleanup for WebSocket connection records
-- encrypted S3 buckets
-- seven Lambda functions
-- HTTP and WebSocket APIs
-- S3-to-Lambda notification filtering on `uploads/`
-- EventBridge handling for Transcribe job completion
-- scoped Lambda permissions
-- a private frontend S3 origin
-- CloudFront with Origin Access Control
-
-### Validate
+The AWS SAM definition is in [`infra/template.yaml`](infra/template.yaml).
 
 ```powershell
 sam validate --template-file .\infra\template.yaml
 ```
 
-The current template passes basic AWS SAM validation.
+The template has passed basic SAM validation. The deployed application was built and iterated on directly in AWS before the infrastructure was reconstructed in SAM, so a fresh clean-stack deployment from the template has not been claimed as verified.
 
-### Build
+`ws_message` uses `amazon-transcribe` and `awscrt`; builds should therefore be produced in a Linux-compatible environment when packaging the Lambda dependencies.
 
-`ws_message` depends on `amazon-transcribe` and `awscrt`. Because `awscrt` contains native components, build the Lambda package in a Linux-compatible environment (for example Linux/WSL or a SAM build container) before deploying it.
+## Limitations
 
-```powershell
-sam build --use-container --template-file .\infra\template.yaml
-```
-
-### Deploy
-
-After a successful build:
-
-```powershell
-sam deploy --guided
-```
-
-The template exposes CloudFormation outputs for the HTTP API URL, WebSocket URL, CloudFront frontend URL, bucket names, and DynamoDB table names.
-
-## Deployment status
-
-A working version of the application has been deployed on AWS with the frontend delivered through CloudFront and the backend running on the serverless architecture documented above.
-
-The SAM template in this repository was reconstructed from that deployment and has passed `sam validate`. A fresh containerized `sam build` / clean-stack deployment has **not** been verified as part of this repository release.
-
-## Security and portability
-
-Before publishing this repository, the source was cleaned to avoid embedding deployment-specific values.
-
-- AWS account IDs and API IDs are not hardcoded.
-- Bucket and table names are injected through environment variables.
-- AWS region is obtained from the Lambda runtime environment.
-- `frontend/config.js` is excluded from Git.
-- No AWS access keys, session tokens, private keys, or obvious API-key/password patterns were detected in the final source scan.
-- The frontend S3 bucket defined by SAM is private and accessed through CloudFront Origin Access Control.
-
-## Notes and limitations
-
-- Live transcription is implemented as short independent streaming chunks rather than one persistent Transcribe connection.
-- `get_logs` is designed for demo-scale usage and scans DynamoDB rather than using a paginated/query-oriented access pattern.
-- The APIs currently use permissive CORS / unauthenticated routes suitable for a demonstration project; production use should add authentication and tighter origin restrictions.
-- Amazon Transcribe, Comprehend, Lambda, API Gateway, DynamoDB, S3, and CloudFront are usage-billed AWS services; actual cost depends on region and workload.
+- The live path is buffered near-real-time transcription rather than one persistent Amazon Transcribe session.
+- DynamoDB is used for short-lived live-session buffering because it fits this serverless design; it is not intended as general-purpose audio storage.
+- `get_logs` is demo-scale and scans recent log data rather than implementing a production query/pagination model.
+- The current APIs are designed for a portfolio/demo deployment and would need stronger authentication and origin restrictions for public production use.
+- AWS service usage is billable and depends on region and workload.
 
 ## Tech stack
 
-`Python 3.12` · `JavaScript` · `AWS Lambda` · `API Gateway WebSocket/HTTP` · `Amazon Transcribe` · `Amazon Comprehend` · `DynamoDB` · `S3` · `EventBridge` · `CloudFront` · `AWS SAM`
+`Python 3.12` · `JavaScript` · `AWS Lambda` · `API Gateway` · `Amazon Transcribe` · `Amazon Comprehend` · `DynamoDB` · `S3` · `EventBridge` · `CloudFront` · `AWS SAM`
