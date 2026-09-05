@@ -72,7 +72,7 @@ function resizeSparkline() {
 window.addEventListener("resize", () => { resizeCanvas(); resizeSparkline(); });
 
 let audioCtx=null, micStream=null, sourceNode=null, analyser=null,
-    processor=null, ws=null, recording=false, rafId=null;
+    processor=null, ws=null, recording=false, rafId=null, finishing=false;
 let pcmBuf=[], pcmSamples=0;
 
 // Running transcript + sentiment state
@@ -354,6 +354,26 @@ function onMsg(e) {
     micSub.textContent = `⚠ ${msg.message}`;
     console.error("[ws] server error:", msg.message);
   }
+  else if (msg.type === "session_complete") {
+  finishing = false;
+
+  setStatus(
+    "Idle",
+    "Click to start streaming"
+  );
+
+  if (
+    ws &&
+    ws.readyState === WebSocket.OPEN
+  ) {
+    ws.close(
+      1000,
+      "session complete"
+    );
+  }
+
+  ws = null;
+}
 }
 
 /* Continuous Transcript (Single Growing Paragraph, newest words fade in) */
@@ -507,16 +527,47 @@ async function startRecording() {
 
 /* ── STOP ── */
 function stopRecording() {
+  if (!recording || finishing) return;
+
   recording = false;
+  finishing = true;
+
   micBtn.classList.remove("recording");
-  micBtn.setAttribute("aria-label", "Start recording");
+  micBtn.setAttribute(
+    "aria-label",
+    "Finishing recording"
+  );
+
   micBtn.style.boxShadow = "";
-  setStatus("Idle", "Click to start streaming");
+
+  setStatus(
+    "Finishing…",
+    "Waiting for final transcription"
+  );
+
   partialEl.textContent = "";
+
+  // Send any sub-0.5s audio still in the browser buffer.
   flush(true);
+
+  // Stop microphone capture, but keep WebSocket open.
   cleanupAudio();
   stopTimer();
-  setTimeout(() => { if(ws){ ws.close(1000,"user stopped"); ws=null; } }, 1500);
+
+  // Give the final audio frame a moment to reach the backend.
+  setTimeout(() => {
+    if (
+      ws &&
+      ws.readyState === WebSocket.OPEN
+    ) {
+      ws.send(
+        JSON.stringify({
+          action: "audio_chunk",
+          finish_session: true
+        })
+      );
+    }
+  }, 300);
 }
 
 function cleanupAudio() {
@@ -531,7 +582,17 @@ function cleanupAudio() {
   currentVolumeLevel = 0;
 }
 
-micBtn.addEventListener("click", () => recording ? stopRecording() : startRecording());
+micBtn.addEventListener(
+  "click",
+  () => {
+    if (finishing) return;
+
+    recording
+      ? stopRecording()
+      : startRecording();
+  }
+);
+
 clearBtn.addEventListener("click", () => {
   liveFeed.innerHTML="";
   liveFeed.appendChild(liveEmpty);
@@ -550,15 +611,27 @@ clearBtn.addEventListener("click", () => {
    hijack normal typing elsewhere on the page (e.g. future form fields). */
 window.addEventListener("keydown", (e) => {
   const tag = (e.target.tagName || "").toLowerCase();
-  const isTyping = tag === "input" || tag === "textarea" || e.target.isContentEditable;
+  const isTyping =
+    tag === "input" ||
+    tag === "textarea" ||
+    e.target.isContentEditable;
+
   if (isTyping) return;
-  // Only act while the Live Mic tab is active
-  const liveTabActive = document.getElementById("tab-live").classList.contains("active");
+
+  const liveTabActive = document
+    .getElementById("tab-live")
+    .classList.contains("active");
+
   if (!liveTabActive) return;
 
   if (e.code === "Space" || e.code === "KeyR") {
     e.preventDefault();
-    recording ? stopRecording() : startRecording();
+
+    if (finishing) return;
+
+    recording
+      ? stopRecording()
+      : startRecording();
   }
 });
 
