@@ -2,62 +2,116 @@
 
 **Signal** is a serverless AWS application for live microphone transcription, sentiment analysis, and asynchronous audio-file transcription.
 
-The project uses **API Gateway WebSockets, AWS Lambda, Amazon Transcribe, Amazon Comprehend, DynamoDB, S3, EventBridge, and CloudFront**. The live path uses buffered near-real-time transcription rather than pretending a Lambda-based WebSocket integration is one persistent Transcribe session.
+The project uses **API Gateway WebSockets, AWS Lambda, Amazon Transcribe, Amazon Comprehend, DynamoDB, S3, EventBridge, and CloudFront**. The live path uses buffered near-real-time transcription rather than treating each small WebSocket frame as an independent speech-recognition session.
 
 ## Demo
 
-> **Live demo video / GIF placeholder**  
-> Add the final recording at `docs/demo-live.gif` or link the recorded video here.
+### Live transcription
 
-<!-- Example once added:
+> **GIF placeholder** — add `docs/demo-live.gif`
+
+<!-- Once the GIF is added, replace the placeholder above with:
 ![Live transcription demo](docs/demo-live.gif)
 -->
 
-> **AWS architecture / console screenshot placeholder**  
-> Add the selected AWS Console screenshot at `docs/aws-architecture.png`.
+Shows the browser microphone path, buffered transcription arriving in segments, live sentiment updates, and the graceful final flush when recording stops.
 
-<!-- Example once added:
-![AWS architecture](docs/aws-architecture.png)
+### File upload transcription
+
+> **GIF placeholder** — add `docs/demo-upload.gif`
+
+<!-- Once the GIF is added, replace the placeholder above with:
+![File upload demo](docs/demo-upload.gif)
+-->
+
+Shows audio upload, asynchronous batch transcription, sentiment analysis, and the completed result in the UI.
+
+### Interface screenshots
+
+The final README can also include these supporting screenshots:
+
+| View | Suggested file |
+|---|---|
+| Live microphone — idle | `docs/live-idle.png` |
+| Live microphone — transcript + sentiment | `docs/live-result.png` |
+| File upload — completed transcription | `docs/upload-result.png` |
+| Log history | `docs/log-history.png` |
+
+<!-- Suggested gallery after the images are added:
+<table>
+  <tr>
+    <td><img src="docs/live-idle.png" alt="Live microphone idle" /></td>
+    <td><img src="docs/live-result.png" alt="Live transcription result" /></td>
+  </tr>
+  <tr>
+    <td><img src="docs/upload-result.png" alt="File upload result" /></td>
+    <td><img src="docs/log-history.png" alt="Log history" /></td>
+  </tr>
+</table>
 -->
 
 ## What it does
 
 - Captures microphone audio in the browser and sends small PCM frames through API Gateway WebSockets.
-- Buffers those frames into larger speech segments before sending them to Amazon Transcribe, which gives the recognizer enough context to produce useful text.
-- Returns transcript segments and Amazon Comprehend sentiment results to the browser while the session is active.
-- Flushes the final incomplete audio segment when recording stops so the end of a sentence is not lost.
+- Buffers those frames into larger speech segments before sending them to Amazon Transcribe.
+- Returns transcript segments and Amazon Comprehend sentiment results while the live session is active.
+- Flushes the final incomplete audio segment before closing the WebSocket when recording stops.
 - Accepts audio-file uploads through presigned S3 URLs and processes them asynchronously with Amazon Transcribe.
 - Stores transcription and sentiment results in DynamoDB and exposes recent activity through an HTTP API.
 
 ## Architecture
 
 ```mermaid
-flowchart LR
-    U[Browser] -->|HTTPS| CF[CloudFront]
-    CF --> FE[S3 Frontend]
+flowchart TB
+    U[Browser]
+    CF[CloudFront + S3 Frontend]
 
-    U -->|0.5 s PCM frames| WS[API Gateway WebSocket]
-    WS --> WM[ws_message Lambda]
-    WM -->|temporary session buffer| DDB[(DynamoDB)]
-    WM -->|buffered audio segment| TS[Amazon Transcribe Streaming]
-    WM --> C[Amazon Comprehend]
+    U --> CF
+
+    subgraph LIVE[Live microphone path]
+        WS[API Gateway WebSocket]
+        WM[ws_message Lambda]
+        BUF[(DynamoDB session buffer)]
+        TS[Amazon Transcribe Streaming]
+        C1[Amazon Comprehend]
+
+        WS --> WM
+        WM --> BUF
+        BUF --> WM
+        WM --> TS
+        TS --> WM
+        WM --> C1
+    end
+
+    subgraph BATCH[File upload path]
+        HTTP[API Gateway HTTP]
+        UL[upload_url Lambda]
+        S3[(S3 Upload Bucket)]
+        ST[transcribe_status Lambda]
+        TB[Amazon Transcribe Batch]
+        EB[EventBridge]
+        TC[transcribe_complete Lambda]
+        C2[Amazon Comprehend]
+
+        HTTP --> UL
+        UL --> S3
+        S3 --> ST
+        ST --> TB
+        TB --> EB
+        EB --> TC
+        TC --> C2
+    end
+
+    LOGS[(DynamoDB logs)]
+
+    U -->|0.5 s PCM frames| WS
     WM -->|transcript + sentiment| WS
+    WS --> U
 
-    U -->|POST /upload-url| HTTP[API Gateway HTTP]
-    HTTP --> UL[upload_url Lambda]
-    UL -->|presigned PUT| U
-    U --> S3[(S3 Upload Bucket)]
-
-    S3 --> ST[transcribe_status Lambda]
-    ST --> TB[Amazon Transcribe Batch]
-    TB --> EB[EventBridge]
-    EB --> TC[transcribe_complete Lambda]
-    TC --> C
-    TC --> DDB
-
-    U -->|GET /logs| HTTP
-    HTTP --> GL[get_logs Lambda]
-    GL --> DDB
+    U -->|request upload URL / read logs| HTTP
+    TC --> LOGS
+    WM --> LOGS
+    HTTP --> LOGS
 ```
 
 ### Live microphone flow
@@ -73,9 +127,9 @@ Browser microphone
   → transcript + sentiment returned to browser
 ```
 
-When the user presses **Stop**, the browser sends any remaining local audio and requests a graceful session finish. The backend processes the remaining server-side buffer before the WebSocket is closed.
+When **Stop** is pressed, the browser flushes any remaining local audio and requests a graceful finish. The backend processes the remaining server-side buffer before the WebSocket closes.
 
-This is **buffered near-real-time transcription**, not a single long-lived Transcribe stream across the whole browser session.
+This is **buffered near-real-time transcription**, not one long-lived Transcribe stream across the full browser session.
 
 ### File upload flow
 
@@ -92,47 +146,9 @@ Browser
 
 ## Project evolution
 
-The first working version was assembled directly in the AWS Console while I was learning how API Gateway WebSockets, Lambda, Transcribe, DynamoDB, and the browser audio pipeline behave together.
+The first working version was built directly in the AWS Console to get the end-to-end serverless flow working. The live path initially opened a new Transcribe session for every small WebSocket audio frame; it worked technically, but the transcript lost too much context to be useful.
 
-The original live-transcription implementation treated every small WebSocket audio message as an independent Transcribe session. That kept the integration simple, but the speech recognizer had almost no surrounding context. In practice, words were skipped or misinterpreted and the result was not useful as a continuous transcript.
-
-The live path was then changed so the browser still sends small frames that stay within API Gateway WebSocket limits, while Lambda persists them temporarily by connection and sends a larger buffered segment to Transcribe. This produced a large improvement in transcript continuity without replacing the existing serverless architecture.
-
-A second issue appeared at session shutdown: if the user stopped recording while the final segment was still incomplete or being processed, the WebSocket could close before the last text returned. The stop flow was changed to perform a graceful drain and close only after the backend finishes the remaining audio.
-
-The infrastructure was later documented in AWS SAM so the architecture is represented as code rather than existing only as manually configured cloud resources.
-
-## Issues faced and solved
-
-### 1. Very poor live transcription across short chunks
-
-**Problem:** The browser sent small audio frames and each frame opened a new Transcribe Streaming session. Each request was valid on its own, but Transcribe repeatedly lost linguistic context at chunk boundaries.
-
-**Fix:** Keep the small WebSocket transport frames, accumulate them into a larger per-connection audio buffer, and transcribe the combined segment. This preserved the API Gateway transport while giving Transcribe substantially more context.
-
-### 2. WebSocket payload-size constraint
-
-**Problem:** Sending a complete multi-second raw PCM segment as one JSON WebSocket message would grow beyond the practical API Gateway frame limit.
-
-**Fix:** Transport remains split into roughly 0.5-second PCM frames. Buffering happens behind the WebSocket boundary instead of making the client send one large message.
-
-### 3. Final words lost when recording stopped
-
-**Problem:** The original frontend closed the WebSocket shortly after Stop. A partially filled buffer, or a Transcribe request already in progress, could finish after the connection disappeared.
-
-**Fix:** Stop now becomes a graceful finish operation: local audio is flushed, microphone capture ends, the socket stays open, the backend drains the final buffer, and only then does the session close.
-
-### 4. DynamoDB transcript concatenation failure
-
-**Problem:** An early helper attempted to concatenate DynamoDB string attributes with `+` inside an update expression. DynamoDB treats `+` as numeric addition, causing a `ValidationException` after transcription had already succeeded.
-
-**Fix:** Transcript segments are stored as a list and appended using DynamoDB `list_append`, then joined when the cumulative transcript is needed.
-
-### 5. Lambda state does not survive WebSocket messages
-
-**Problem:** API Gateway maintains the client WebSocket connection, but each route message can invoke a separate Lambda execution. In-memory session state therefore cannot be relied on between audio messages.
-
-**Fix:** Per-connection state, transcript fragments, and temporary audio-buffer state are persisted in DynamoDB.
+The live path was then changed to preserve the small transport frames while buffering them into larger segments before transcription. A graceful stop flow was added so the final partial segment is not lost, and the deployed architecture was later documented in AWS SAM.
 
 ## AWS services
 
@@ -178,7 +194,7 @@ The infrastructure was later documented in AWS SAM so the architecture is repres
 │   ├── ws_connect/
 │   ├── ws_disconnect/
 │   └── ws_message/
-├── docs/                  # demo media / AWS screenshots
+├── docs/                  # demo media / screenshots
 └── README.md
 ```
 
@@ -212,6 +228,16 @@ sam validate --template-file .\infra\template.yaml
 The template has passed basic SAM validation. The deployed application was built and iterated on directly in AWS before the infrastructure was reconstructed in SAM, so a fresh clean-stack deployment from the template has not been claimed as verified.
 
 `ws_message` uses `amazon-transcribe` and `awscrt`; builds should therefore be produced in a Linux-compatible environment when packaging the Lambda dependencies.
+
+## Issues faced and solved
+
+| Issue | Resolution |
+|---|---|
+| Short independent Transcribe sessions skipped or misread words | Kept 0.5 s WebSocket transport frames but buffered them into ~6 s segments before transcription |
+| Large PCM messages would exceed practical WebSocket payload limits | Kept buffering on the backend instead of increasing client message size |
+| Final words could disappear when the user stopped recording | Added a graceful finish flow that drains the remaining buffer before closing the socket |
+| DynamoDB string concatenation caused a `ValidationException` | Stored transcript fragments as a list and used `list_append` |
+| Lambda executions cannot rely on in-memory state between WebSocket messages | Persisted per-connection transcript and temporary audio state in DynamoDB |
 
 ## Limitations
 
