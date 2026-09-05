@@ -8,19 +8,17 @@ The project uses **API Gateway WebSockets, AWS Lambda, Amazon Transcribe, Amazon
 
 ### Live transcription
 
-[![Live transcription demo](docs/live-result.png)](docs/demo-live.mp4)
+![Live transcription demo](docs/demo-live.gif)
 
-**[Watch the live transcription demo](docs/demo-live.mp4)**
-
-The recording shows microphone audio being sent through the WebSocket path, transcription arriving in buffered segments, live sentiment updates, and the final transcript being completed when recording stops.
+The demo shows microphone audio moving through the WebSocket path, transcription arriving in buffered segments, live sentiment updates, and the final transcript being completed when recording stops.
 
 ### File upload transcription
 
 ![File upload transcription result](docs/upload-result.png)
 
-**[Open the sample audio used for the batch transcription demo](docs/demo-upload.mp3)**
+**[Sample audio used for the upload demo](docs/demo-upload.mp3)**
 
-The uploaded audio is sent directly to S3 with a presigned URL, processed asynchronously with Amazon Transcribe, analyzed with Amazon Comprehend, and displayed in the frontend when processing completes.
+The sample audio is uploaded directly to S3 with a presigned URL, processed asynchronously with Amazon Transcribe, analyzed with Amazon Comprehend, and displayed in the frontend when processing completes.
 
 ### Interface
 
