@@ -8,47 +8,32 @@ The project uses **API Gateway WebSockets, AWS Lambda, Amazon Transcribe, Amazon
 
 ### Live transcription
 
-> **GIF placeholder** — add `docs/demo-live.gif`
+[![Live transcription demo](docs/live-result.png)](docs/demo-live.mp4)
 
-<!-- Once the GIF is added, replace the placeholder above with:
-![Live transcription demo](docs/demo-live.mp4)
--->
+**[Watch the live transcription demo](docs/demo-live.mp4)**
 
-Shows the browser microphone path, buffered transcription arriving in segments, live sentiment updates, and the graceful final flush when recording stops.
+The recording shows microphone audio being sent through the WebSocket path, transcription arriving in buffered segments, live sentiment updates, and the final transcript being completed when recording stops.
 
 ### File upload transcription
 
-> **GIF placeholder** — add `docs/demo-upload.gif`
+![File upload transcription result](docs/upload-result.png)
 
-<!-- Once the GIF is added, replace the placeholder above with:
-![File upload demo](docs/demo-upload.mp3)
--->
+**[Open the sample audio used for the batch transcription demo](docs/demo-upload.mp3)**
 
-Shows audio upload, asynchronous batch transcription, sentiment analysis, and the completed result in the UI.
+The uploaded audio is sent directly to S3 with a presigned URL, processed asynchronously with Amazon Transcribe, analyzed with Amazon Comprehend, and displayed in the frontend when processing completes.
 
-### Interface screenshots
+### Interface
 
-The final README can also include these supporting screenshots:
-
-| View | Suggested file |
-|---|---|
-| Live microphone — idle | `docs/live-idle.png` |
-| Live microphone — transcript + sentiment | `docs/live-result.png` |
-| File upload — completed transcription | `docs/upload-result.png` |
-| Log history | `docs/log-history.png` |
-
-<!-- Suggested gallery after the images are added:
 <table>
   <tr>
-    <td><img src="docs/live-idle.png" alt="Live microphone idle" /></td>
-    <td><img src="docs/live-result.png" alt="Live transcription result" /></td>
+    <td align="center"><strong>Live microphone — idle</strong><br><img src="docs/live-idle.png" alt="Live microphone idle" /></td>
+    <td align="center"><strong>Live transcript + sentiment</strong><br><img src="docs/live-result.png" alt="Live transcription result" /></td>
   </tr>
   <tr>
-    <td><img src="docs/upload-result.png" alt="File upload result" /></td>
-    <td><img src="docs/log-history.png" alt="Log history" /></td>
+    <td align="center"><strong>File transcription result</strong><br><img src="docs/upload-result.png" alt="File upload result" /></td>
+    <td align="center"><strong>Log history</strong><br><img src="docs/log-history.png" alt="Log history" /></td>
   </tr>
 </table>
--->
 
 ## What it does
 
