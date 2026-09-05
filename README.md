@@ -11,7 +11,7 @@ The project uses **API Gateway WebSockets, AWS Lambda, Amazon Transcribe, Amazon
 > **GIF placeholder** — add `docs/demo-live.gif`
 
 <!-- Once the GIF is added, replace the placeholder above with:
-![Live transcription demo](docs/demo-live.gif)
+![Live transcription demo](docs/demo-live.mp4)
 -->
 
 Shows the browser microphone path, buffered transcription arriving in segments, live sentiment updates, and the graceful final flush when recording stops.
@@ -21,7 +21,7 @@ Shows the browser microphone path, buffered transcription arriving in segments, 
 > **GIF placeholder** — add `docs/demo-upload.gif`
 
 <!-- Once the GIF is added, replace the placeholder above with:
-![File upload demo](docs/demo-upload.gif)
+![File upload demo](docs/demo-upload.mp3)
 -->
 
 Shows audio upload, asynchronous batch transcription, sentiment analysis, and the completed result in the UI.
