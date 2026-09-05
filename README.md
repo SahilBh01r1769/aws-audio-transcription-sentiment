@@ -208,7 +208,7 @@ The AWS SAM definition is in [`infra/template.yaml`](infra/template.yaml).
 sam validate --template-file .\infra\template.yaml
 ```
 
-The template has passed basic SAM validation. The deployed application was built and iterated on directly in AWS before the infrastructure was reconstructed in SAM, so a fresh clean-stack deployment from the template has not been claimed as verified.
+The template has passed basic SAM validation. The deployed application was built and iterated on directly in AWS.
 
 `ws_message` uses `amazon-transcribe` and `awscrt`; builds should therefore be produced in a Linux-compatible environment when packaging the Lambda dependencies.
 
