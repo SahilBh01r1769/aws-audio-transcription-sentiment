@@ -10,8 +10,8 @@ from decimal import Decimal
 
 import boto3
 
-LOGS_TABLE = os.environ["LOGS_TABLE_NAME"]
-AWS_REGION = os.environ["AWS_REGION"]
+LOGS_TABLE = os.environ.get("LOGS_TABLE_NAME", "audio_app_logs")
+AWS_REGION = os.environ.get("AWS_REGION", "ap-south-1")
 
 _dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
 _table = _dynamodb.Table(LOGS_TABLE)
