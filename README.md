@@ -210,30 +210,6 @@ Live microphone sessions prioritize incremental feedback. Uploaded files use the
 
 ---
 
-## Repository structure
-
-```text
-.
-├── frontend/
-│   ├── app.js
-│   ├── config.example.js
-│   └── index.html
-├── infra/
-│   └── template.yaml
-├── lambdas/
-│   ├── get_logs/
-│   ├── transcribe_complete/
-│   ├── transcribe_status/
-│   ├── upload_url/
-│   ├── ws_connect/
-│   ├── ws_disconnect/
-│   └── ws_message/
-├── docs/
-└── README.md
-```
-
----
-
 ## Configuration
 
 Runtime API endpoints are kept out of source control.
@@ -262,8 +238,6 @@ The AWS SAM definition is in [`infra/template.yaml`](infra/template.yaml).
 ```powershell
 sam validate --template-file .\infra\template.yaml
 ```
-
-The template has passed basic SAM validation. The deployed application itself was built and iterated on directly in AWS before the architecture was documented in SAM.
 
 `ws_message` uses `amazon-transcribe` and `awscrt`; Lambda packages containing those dependencies should be built in a Linux-compatible environment.
 
